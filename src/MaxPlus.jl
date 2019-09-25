@@ -8,15 +8,31 @@ module MaxPlus
 using
     LinearAlgebra, SparseArrays, Printf
 
+# ==============================================================================
+# Max-Plus core
+
 export
-    MP, SpaMP, SpvMP, ArrMP,
+    MP, SpaMP, SpvMP, ArrMP, VecMP,
     mpzero, mpone, mp0, mp1, mptop,
     mpI, mpeye, mpzeros, mpones,
     mpsparse, full, dense, array,
     plustimes, minplus,
     mptrace, mpnorm, mpstar,
-    mpsyslin,
     mp_change_display, LaTeX
+
+# ==============================================================================
+# Max-Plus Linear system
+
+export
+    MPSysLin,
+    mpsyslin, mpsimul, mpexplicit
+
+# ==============================================================================
+# Max-Plus flowhop
+
+export
+    mpgraph
+#    flowshop, flowshop_graph, flowshop_simu
 
 # ==============================================================================
 
@@ -35,7 +51,9 @@ julia> a=MP(3); typeof(a)
 MP{Int64}
 ```
 """
-struct MP{T} <: Number λ::T end
+struct MP{T <: Real} <: Real
+    λ::T
+end
 
 # ==============================================================================
 # Type alias but with shorter number of characters
@@ -44,6 +62,7 @@ const Sparse{T,U} = SparseMatrixCSC{T,U}
 const SpaMP{T,U}  = SparseMatrixCSC{MP{T},U}
 const SpvMP{T,U}  = SparseVector{MP{T},U}
 const ArrMP{T,N}  = Array{MP{T},N}
+const VecMP{T,N}  = Vector{MP{T}}
 
 # ==============================================================================
 # Copy constructor
@@ -52,8 +71,118 @@ MP(x::MP) = MP(x.λ)
 
 # ==============================================================================
 
+"""
+    zero(::MP{T})
+
+Create the max-plus constant zero equal to -Inf.
+This value is the neutral for the ⨁ operator.
+"""
+Base.zero(::Type{MP{T}}) where T = MP(typemin(T))
+Base.zero(x::MP{T})      where T = zero(typeof(x))
+
+"""
+    mpzero(::Type{T})
+
+Create the max-plus constant zero equal to -Inf.
+This value is the neutral for the ⨁ operator.
+"""
+mpzero(::Type{T})        where T = MP(typemin(T))
+
+# ==============================================================================
+
+"""
+    one(::MP{T})
+
+Create the max-plus constant one equal to 0.
+This value is the neutral for operators ⨁ and ⨂.
+"""
+Base.one(::Type{MP{T}})  where T = MP(zero(T))
+Base.one(x::MP{T})       where T = one(typeof(x))
+
+"""
+    one(::Type{T})
+
+Create the max-plus constant one equal to 0.
+This value is the neutral for operators ⨁ and ⨂.
+"""
+mpone(::Type{T})         where T = MP(zero(T))
+
+# ==============================================================================
+
+"""
+    mp0
+
+Max-plus constant zero equal to -Inf.
+This value is the neutral for the ⨁ operator.
+
+Equivalent to ScicosLab code: `%0 = #(-%inf) = .`
+
+# Examples
+```julia-repl
+julia> mp0 * 5
+-Inf
+
+julia> mp0 + 5
+5.0
+```
+"""
+const global mp0 = mpzero(Float64)
+
+# ==============================================================================
+
+"""
+    mp1
+
+Max-plus constant one equal to 0.
+This value is the neutral for operators ⨁ and ⨂.
+
+Equivalent to ScicosLab code: `%1 = #(1) = 0`
+
+# Examples
+```julia-repl
+julia> mp1 * 5
+5.0
+
+julia> mp1 + 5
+5.0
+```
+"""
+const global mp1 = mpone(Float64)
+
+# ==============================================================================
+
+"""
+    mptop
+
+Min-plus constant "top" equal to +Inf.
+
+Equivalent to ScicosLab code: `%top = #(%inf)`
+"""
+const global mptop = MP{Float64}(Inf)
+
+# ==============================================================================
+# Conversions
+
 Base.promote_rule(::Type{MP{T}}, ::Type{U}) where {T, U} = MP{T}
-Base.convert(::MP{T}, x)                    where T = MP(T(x))
+Base.convert(::MP{T}, x::Number)            where T = MP{T}(x)
+
+# ==============================================================================
+
+"""
+    MP(x::UnitRange)
+
+Create a max-plus dense vector.
+
+# Examples
+```julia-repl
+julia> MP(1:3)
+3-element Array{MP{Int64},1}:
+ 1
+ 2
+ 3
+```
+"""
+MP(x::UnitRange{T}) where T = MP(Vector{T}(x))
 
 # ==============================================================================
 
@@ -256,6 +385,8 @@ function LaTeX(io::IO, A::ArrMP{T}) where T
     (@printf io "\\end{array}\n\\right]\n")
 end
 
+LaTeX(io::IO, S::SpaMP{T}) where {T,U} = LaTeX(io, full(S))
+
 # ==============================================================================
 
 """
@@ -296,9 +427,8 @@ Base.:(*)(x::Real, y::MP)   = MP(x   + y.λ)
 @inline Base.literal_pow(::typeof(^), x::MP, ::Val{0}) = one(x)
 @inline Base.literal_pow(::typeof(^), x::MP, ::Val{p}) where {p} = MP(x.λ * p)
 @inline Base.:(^)(x::MP, y::Number) = MP(x.λ * y)
-
-@inline Base.literal_pow(::typeof(^), A::ArrMP{T}, ::Val{0}) where T = mpeye(T, size(A,1), size(A,2))
 @inline Base.literal_pow(::typeof(^), A::ArrMP{T}, ::Val{p}) where {T, p} = A^p
+@inline Base.abs2(x::MP) = x.λ + x.λ
 
 # ==============================================================================
 
@@ -356,124 +486,28 @@ julia> min(MP([10 1; 10 1]), MP([4 5; 6 5]))
 Base.:min(x::MP,   y::MP)   = MP(min(x.λ, y.λ))
 Base.:min(x::MP,   y::Real) = MP(min(x.λ, y))
 Base.:min(x::Real, y::MP)   = MP(min(x,   y.λ))
-Base.:min(A::ArrMP{T}, B::ArrMP{T}) where T = map(Base.:min, A, B)
-Base.:min(A::SpaMP{T,U}, B::SpaMP{T,U}) where {T, U} =
-    map(Base.:min, A, B)
+Base.:min(A::ArrMP, B::ArrMP) = map(Base.:min, A, B)
+Base.:min(A::SpaMP, B::SpaMP) = map(Base.:min, A, B)
 
 # ==============================================================================
 
+Base.:(==)(x::MP,   y::MP)   = (x.λ == y.λ)
 Base.:(==)(x::MP,   y::Real) = (x.λ == y)
 Base.:(==)(x::Real, y::MP)   = (x   == y.λ)
+
+Base.:(<=)(x::MP,   y::MP)   = (x.λ <= y.λ)
+Base.:(<=)(x::MP,   y::Real) = (x.λ <= y)
+Base.:(<=)(x::Real, y::MP)   = (x   <= y.λ)
+
+Base.:(<)(x::MP,   y::MP)   = (x.λ < y.λ)
+Base.:(<)(x::MP,   y::Real) = (x.λ < y)
+Base.:(<)(x::Real, y::MP)   = (x   < y.λ)
 
 Base.isless(x::MP,   y::MP)   = x.λ < y.λ
 Base.isless(x::MP,   y::Real) = x.λ < y
 Base.isless(x::Real, y::MP)   = x < y.λ
 
 # ==============================================================================
-
-"""
-    zero(::MP{T})
-
-Create the max-plus constant zero equal to -Inf.
-This value is the neutral for the ⨁ operator.
-"""
-Base.zero(::Type{MP{T}}) where T = MP(typemin(T))
-Base.zero(x::MP{T})      where T = zero(typeof(x))
-
-"""
-    mpzero(::Type{T})
-
-Create the max-plus constant zero equal to -Inf.
-This value is the neutral for the ⨁ operator.
-"""
-mpzero(::Type{T})        where T = MP(typemin(T))
-
-"""
-    one(::MP{T})
-
-Create the max-plus constant one equal to 0.
-This value is the neutral for operators ⨁ and ⨂.
-"""
-Base.one(::Type{MP{T}})  where T = MP(zero(T))
-Base.one(x::MP{T})       where T = one(typeof(x))
-
-"""
-    one(::Type{T})
-
-Create the max-plus constant one equal to 0.
-This value is the neutral for operators ⨁ and ⨂.
-"""
-mpone(::Type{T})         where T = MP(zero(T))
-
-# ==============================================================================
-
-"""
-    mp0
-
-Max-plus constant zero equal to -Inf.
-This value is the neutral for the ⨁ operator.
-
-Equivalent to ScicosLab code: `%0 = #(-%inf) = .`
-
-# Examples
-```julia-repl
-julia> mp0 * 5
--Inf
-
-julia> mp0 + 5
-5.0
-```
-"""
-const global mp0 = mpzero(Float64)
-
-# ==============================================================================
-
-"""
-    mp1
-
-Max-plus constant one equal to 0.
-This value is the neutral for operators ⨁ and ⨂.
-
-Equivalent to ScicosLab code: `%1 = #(1) = 0`
-
-# Examples
-```julia-repl
-julia> mp1 * 5
-5.0
-
-julia> mp1 + 5
-5.0
-```
-"""
-const global mp1 = mpone(Float64)
-
-# ==============================================================================
-
-"""
-    mptop
-
-Min-plus constant "top" equal to +Inf.
-
-Equivalent to ScicosLab code: `%top = #(%inf)`
-"""
-const global mptop = MP{Float64}(Inf)
-
-# ==============================================================================
-
-"""
-    mpI
-
-Fix an algebra conception in Julia official LinearAlgebra (uniformscaling.jl)
-`I` representes an identity matrix of any size is defined with a booleen instead
-of the function `one()`. As consequence, in Julia 0.4 the `eye(T,m,n)` could
-created a max-plus identity matrix. Since Julia 0.7 `eye()` has been deprecated
-and replaced by the buggy `Matrix{T}(I, m, n)`. This function uses `zero()` but
-not `one()` and as consequence the max-plus identity matrix is not well formed.
-
-This const allows to be more algebra compliant by calling `one()` and fixing the
-fucntion `Matrix{T}(I, m, n)`.
-"""
-const global mpI = UniformScaling(one(MP{Float64}).λ)
 
 """
     mpeye(::Type{T}, n::Int64)
@@ -537,6 +571,38 @@ julia> mpzeros(Float64, 2,5)
 """
 mpzeros(::Type{T}, m::Int64, n::Int64) where T = spzeros(MP{T}, m, n)
 
+"""
+    mpfzeros(::Type{T}, n::Int64)
+
+Construct a dense max-plus zero m-by-n matrix.
+
+# Examples
+```julia-repl
+julia> mpfzeros(Float64, 2,2)
+2×2 Array{MP{Float64},2}:
+ -Inf  -Inf
+ -Inf  -Inf
+```
+"""
+mpfzeros(::Type{T}, m::Int64, n::Int64) where T = full(mpzeros(T, m, n))
+
+# ==============================================================================
+
+"""
+    mpzeros(x::UnitRange{T})
+
+Construct a max-plus zero vector.
+# Examples
+```julia-repl
+julia> mpzeros(1:3)
+3-element Array{MP{Int64},1}:
+ -Inf
+ -Inf
+ -Inf
+```
+"""
+mpzeros(x::UnitRange{T}) where {T} = fill!(MP(similar(x)), mpzero(T))
+
 # ==============================================================================
 
 """
@@ -570,6 +636,23 @@ julia> mpones(Float64, 2,2)
 ```
 """
 mpones(::Type{T}, m::Int64, n::Int64) where T = ones(MP{T}, m, n)
+
+# ==============================================================================
+
+"""
+    mpones(x::UnitRange{T})
+
+Construct a max-plus one vector.
+# Examples
+```julia-repl
+julia> mpones(1:3)
+3-element Array{MP{Int64},1}:
+ 0
+ 0
+ 0
+```
+"""
+mpones(x::UnitRange{T}) where {T} = fill!(MP(similar(x)), mpone(T))
 
 # ==============================================================================
 
@@ -805,7 +888,7 @@ end
 """
     mpstar(A::Array{T})
 
-
+TODO
 """
 mpstar(x::MP{T})    where T = mpstar(plustimes(x))
 mpstar(x::T)        where T = MP(hstar([x]))[1,1]
@@ -815,48 +898,12 @@ mpstar(A::ArrMP{T}) where T = MP(hstar(plustimes(A)))
 #mpstar(S::SpaMP{T,U}) where {T, U} = MP(hstar(plustimes(S)))
 
 # ==============================================================================
-# FIXME error when k < 0
-# TODO: S=mpsyslin(A,B,C [,D [,x0] ]) + simul(S, u)
-
-"""
-    mpsyslin(A::ArrMP{T}, x0::Vector{MP{T}}, k::Int64; history=false)
-
-Compute states X of an autonomous linear max-plus system:
-`x(n+1) = A x(n)`  for n = 0 .. k
-where:
-- `A` is a system matrix
-- `x0` is a initial state vector,
-- `k` is the number of iterations
-- when history is set to true save all computed states, else return the last one.
-
-# Examples
-```julia-repl
-julia> A = MP([1.0 2.0; 3.0 4.0])
-x0 = MP([1.0; 2.0])
-x1 = mpsyslin(A, x0, 1)
-x2 = mpsyslin(A, x1, 1)
-X = mpsyslin(A, x0, 2, history=true)
-x1 == A * x0
-x2 == A * x1
-[x0 x1 x2] == X
-```
-"""
-function mpsyslin(A::ArrMP{T}, x0::Vector{MP{T}}, k::Int64; history=false) where T
-    if history
-        X = mpones(T, size(A, 1), k+1)
-        X[:,1] = x0
-        for i = 1:k
-            X[:,i+1] = A * X[:,i]
-        end
-    else
-        X = x0;
-        for i = 1:k
-            X = A * X;
-        end
-    end
-    X
-end
-
 # TODO insertion out of bounds => Sparse:  d=MP([1.0 2; 3 4]); d[5,5] = MP(6.0)
+
+# ==============================================================================
+include("juliabugs.jl")
+include("howard.jl")
+include("syslin.jl")
+include("flowshop.jl")
 
 end # MaxPlus module
